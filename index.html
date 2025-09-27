@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PH10账本</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Firebase SDKs（compat 版，适合纯静态页） -->
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.4/firebase-app-compat.js"></script>
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100">
+  <div class="max-w-3xl mx-auto p-4 space-y-6">
+    <header class="flex items-center justify-between">
+      <h1 class="text-2xl font-bold">PH10账本</h1>
+      <div class="flex items-center gap-2">
+        <button id="btn-generate" class="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500">生成上月结算</button>
+        <button id="btn-refresh" class="px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600">刷新</button>
+      </div>
+    </header>
+
+    <!-- 基本设置（只记住“我是谁”） -->
+    <section class="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+      <h2 class="font-semibold">我的身份</h2>
+      <div class="grid sm:grid-cols-3 gap-3">
+        <label class="block">我是
+          <select id="payer" class="mt-1 w-full px-3 py-2 bg-slate-800 rounded">
+            <option>塔</option>
+            <option>椰</option>
+            <option>刀</option>
+          </select>
+        </label>
+      </div>
+      <div class="text-sm text-slate-400">* 仅保存在本地浏览器；用于“付款人”默认选项。</div>
+    </section>
+
+    <!-- 新增消费 -->
+    <section class="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+      <h2 class="font-semibold">新增消费</h2>
+      <div class="grid md:grid-cols-2 gap-3">
+        <label class="block">购买小结
+          <input id="summary" class="mt-1 w-full px-3 py-2 bg-slate-800 rounded" placeholder="牛奶+面包 | T&T" />
+        </label>
+        <label class="block">商店（可选）
+          <input id="store" class="mt-1 w-full px-3 py-2 bg-slate-800 rounded" placeholder="T&T" />
+        </label>
+        <label class="block">金额（CAD）
+          <input id="amount" type="number" step="0.01" class="mt-1 w-full px-3 py-2 bg-slate-800 rounded" />
+        </label>
+        <label class="block">购买时间
+          <input id="date" type="date" class="mt-1 w-full px-3 py-2 bg-slate-800 rounded" />
+        </label>
+      </div>
+
+      <div class="space-y-2">
+        <div class="flex items-center gap-4">
+          <label class="inline-flex items-center gap-2">
+            <input type="radio" name="splitMode" value="equal" checked /> 均分（/3）
+          </label>
+          <label class="inline-flex items-center gap-2">
+            <input type="radio" name="splitMode" value="custom" /> 精细分摊
+          </label>
+        </div>
+        <div id="customSplit" class="grid grid-cols-3 gap-3 hidden">
+          <label class="block">塔应付
+            <input id="split-ta" type="number" step="0.01" class="mt-1 w-full px-3 py-2 bg-slate-800 rounded" />
+          </label>
+          <label class="block">椰应付
+            <input id="split-ye" type="number" step="0.01" class="mt-1 w-full px-3 py-2 bg-slate-800 rounded" />
+          </label>
+          <label class="block">刀应付
+            <input id="split-dao" type="number" step="0.01" class="mt-1 w-full px-3 py-2 bg-slate-800 rounded" />
+          </label>
+        </div>
+      </div>
+
+      <button id="btn-add" class="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500">保存</button>
+      <div id="msg" class="text-sm text-amber-300"></div>
+    </section>
+
+    <!-- 最近记录（带编辑/删除） -->
+    <section class="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+      <h2 class="font-semibold">最近消费</h2>
+      <div id="list" class="space-y-2 text-sm"></div>
+    </section>
+
+    <!-- 本月汇总 -->
+    <section class="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+      <h2 class="font-semibold">本月汇总</h2>
+      <div id="summaryBox" class="text-sm space-y-2"></div>
+    </section>
+  </div>
+
+  <script>
+    // —— Firebase 初始化（你的配置） ——
+    const firebaseConfig = {
+      apiKey: "AIzaSyDgBBlo8X3VKSo1x6ubr86wyqnhxb0GOOE",
+      authDomain: "roommates-ledger.firebaseapp.com",
+      projectId: "roommates-ledger",
+      storageBucket: "roommates-ledger.firebasestorage.app",
+      messagingSenderId: "435940829995",
+      appId: "1:435940829995:web:d93549cab0376e0fe7f36e",
+      measurementId: "G-0YVMCV9H9E"
+    };
+
+    let app, db;
+    function $(id){ return document.getElementById(id); }
+    function fmt(n){ return (Math.round(Number(n) * 100) / 100).toFixed(2); }
+    function note(t){ $('msg').textContent = t; setTimeout(()=> $('msg').textContent='', 3000); }
+
+    // split UI 切换
+    const radios = () => document.querySelectorAll('input[name="splitMode"]');
+    function updateSplitUI(){
+      const r = Array.from(radios()).find(x=>x.checked);
+      document.getElementById('customSplit').classList.toggle('hidden', !(r && r.value === 'custom'));
+    }
+
+    window.addEventListener('load', async () => {
+      app = firebase.initializeApp(firebaseConfig);
+      db = firebase.firestore();
+
+      // 恢复“我是谁”
+      const cfg = JSON.parse(localStorage.getItem('cfg') || '{}');
+      $('payer').value = cfg.payer || '塔';
+      $('payer').addEventListener('change', () => {
+        localStorage.setItem('cfg', JSON.stringify({ payer: $('payer').value }));
+      });
+
+      // 默认日期=今天
+      const d = new Date();
+      $('date').value = d.toISOString().slice(0,10);
+
+      radios().forEach(r=>r.addEventListener('change', updateSplitUI));
+      updateSplitUI();
+
+      $('btn-add').addEventListener('click', onSave);
+      $('btn-refresh').addEventListener('click', () => { refreshList(); refreshMonthly(); });
+      $('btn-generate').addEventListener('click', generatePrevSummary);
+
+      await refreshList();
+      await refreshMonthly();
+    });
+
+    // —— 保存一笔 ——
+    async function onSave(){
+      const payer = $('payer').value;
+      const summary = $('summary').value.trim();
+      const store = $('store').value.trim();
+      const amount = Number($('amount').value);
+      const purchasedAt = new Date($('date').value || new Date()).getTime();
+      const splitMode = Array.from(radios()).find(x=>x.checked).value;
+
+      if(!summary || !amount || amount <= 0){ return note('请填写小结与正确金额'); }
+
+      let split = null;
+      if(splitMode === 'custom'){
+        const t = Number($('split-ta').value||0);
+        const y = Number($('split-ye').value||0);
+        const d = Number($('split-dao').value||0);
+        const sum = Math.round((t+y+d)*100)/100;
+        if(Math.abs(sum - Math.round(amount*100)/100) > 0.01){
+          return note(`精细分摊之和 ${fmt(sum)} 必须等于金额 ${fmt(amount)}`);
+        }
+        split = { '塔': Number(fmt(t)), '椰': Number(fmt(y)), '刀': Number(fmt(d)) };
+      }
+
+      const doc = {
+        payer, summary, store,
+        amount: Number(fmt(amount)),
+        purchasedAt, splitMode,
+        ...(split ? { split } : {}),
+        createdAt: Date.now()
+      };
+
+      try {
+        await db.collection('purchases').add(doc);
+        note('已保存');
+        $('summary').value = '';
+        $('store').value = '';
+        $('amount').value = '';
+        await refreshList();
+        await refreshMonthly();
+      } catch(e){ note('保存失败：'+ e.message); }
+    }
+
+    // —— 列出最近记录（含编辑/删除） ——
+    async function refreshList(){
+      const snap = await db.collection('purchases').orderBy('createdAt','desc').limit(50).get();
+      const box = $('list'); box.innerHTML='';
+      snap.docs.forEach(d => {
+        const id = d.id;
+        const x = d.data();
+        const dt = new Date(x.purchasedAt);
+
+        const div = document.createElement('div');
+        div.className = 'p-3 rounded-lg bg-slate-800 flex items-start justify-between gap-3';
+        div.innerHTML = `
+          <div>
+            <div class="font-medium">${x.summary || '(无小结)'} <span class="text-slate-400">${x.store? '· '+x.store: ''}</span></div>
+            <div class="text-slate-400">${dt.toLocaleDateString()} · 付款人：${x.payer} · 金额：$${fmt(x.amount)} · ${x.splitMode==='equal'?'均分':'精细分摊'}</div>
+            ${x.split ? `<div class="text-slate-400">分摊：塔$${fmt(x.split['塔']||0)} / 椰$${fmt(x.split['椰']||0)} / 刀$${fmt(x.split['刀']||0)}</div>` : ''}
+          </div>
+          <div class="flex gap-2">
+            <button data-act="edit" data-id="${id}" class="px-2 py-1 bg-slate-700 rounded hover:bg-slate-600">编辑</button>
+            <button data-act="del" data-id="${id}" class="px-2 py-1 bg-red-600 rounded hover:bg-red-500">删除</button>
+          </div>
+        `;
+        box.appendChild(div);
+      });
+
+      // 事件委托
+      box.onclick = async (e) => {
+        const btn = e.target.closest('button');
+        if(!btn) return;
+        const id = btn.getAttribute('data-id');
+        const act = btn.getAttribute('data-act');
+        if(act === 'del'){
+          if(confirm('确定删除这条记录吗？')){
+            await db.collection('purchases').doc(id).delete();
+            await refreshList(); await refreshMonthly();
+          }
+        }else if(act === 'edit'){
+          await onEdit(id);
+        }
+      };
+    }
+
+    // —— 编辑（用 prompt 简易实现） ——
+    async function onEdit(id){
+      const ref = db.collection('purchases').doc(id);
+      const snap = await ref.get();
+      if(!snap.exists) return;
+
+      const x = snap.data();
+      const summary = prompt('购买小结', x.summary || '') ?? x.summary;
+      const store = prompt('商店（可选）', x.store || '') ?? x.store;
+      const amountStr = prompt('金额（CAD）', String(x.amount)) ?? String(x.amount);
+      const amount = Number(amountStr);
+      const dateStr = prompt('购买时间（YYYY-MM-DD）', new Date(x.purchasedAt).toISOString().slice(0,10)) ?? new Date(x.purchasedAt).toISOString().slice(0,10);
+
+      if(!summary || !amount || amount <= 0){ return note('编辑取消：字段不合法'); }
+
+      // 分摊方式
+      const mode = prompt('分摊方式：equal 或 custom', x.splitMode || 'equal') ?? (x.splitMode || 'equal');
+      let split = null;
+      if(mode === 'custom'){
+        const T = Number(prompt('塔应付', x.split?.['塔'] ?? 0) ?? 0);
+        const Y = Number(prompt('椰应付', x.split?.['椰'] ?? 0) ?? 0);
+        const D = Number(prompt('刀应付', x.split?.['刀'] ?? 0) ?? 0);
+        const sum = Math.round((T+Y+D)*100)/100;
+        if(Math.abs(sum - Math.round(amount*100)/100) > 0.01){
+          return note(`精细分摊之和 ${fmt(sum)} 必须等于金额 ${fmt(amount)}`);
+        }
+        split = { '塔': Number(fmt(T)), '椰': Number(fmt(Y)), '刀': Number(fmt(D)) };
+      }
+
+      await ref.update({
+        summary, store, amount: Number(fmt(amount)),
+        purchasedAt: new Date(dateStr).getTime(),
+        splitMode: mode, ...(split ? { split } : { split: firebase.firestore.FieldValue.delete() })
+      });
+
+      await refreshList(); await refreshMonthly();
+      note('已更新');
+    }
+
+    // —— 本月汇总 —— 
+    async function refreshMonthly(){
+      const now = new Date();
+      const y = now.getFullYear(), m = now.getMonth();
+      const start = new Date(y, m, 1).getTime();
+      const end = new Date(y, m+1, 1).getTime();
+      const snap = await db.collection('purchases')
+        .where('purchasedAt','>=',start)
+        .where('purchasedAt','<',end)
+        .get();
+
+      const entries = snap.docs.map(d=>d.data());
+      const members = ['塔','椰','刀'];
+      const paid = { '塔':0, '椰':0, '刀':0 };
+      const owed = { '塔':0, '椰':0, '刀':0 };
+
+      for(const x of entries){
+        paid[x.payer] = (paid[x.payer] || 0) + x.amount;
+        if(x.splitMode==='equal'){
+          const s = x.amount/3; members.forEach(n=> owed[n]+=s);
+        }else{
+          members.forEach(n=> owed[n]+= (x.split?.[n] || 0));
+        }
+      }
+      members.forEach(n=> { paid[n]=+fmt(paid[n]); owed[n]=+fmt(owed[n]); });
+      const net = {}; members.forEach(n=> net[n]= +fmt(paid[n]-owed[n]) );
+      const settlements = settle(net);
+
+      const box = $('summaryBox');
+      box.innerHTML = `
+        <div>本月支付：塔 $${fmt(paid['塔'])} · 椰 $${fmt(paid['椰'])} · 刀 $${fmt(paid['刀'])}</div>
+        <div>本月应付：塔 $${fmt(owed['塔'])} · 椰 $${fmt(owed['椰'])} · 刀 $${fmt(owed['刀'])}</div>
+        <div>净额（+应收 / -应付）：塔 ${fmt(net['塔'])} · 椰 ${fmt(net['椰'])} · 刀 ${fmt(net['刀'])}</div>
+        <div class="pt-2 font-medium">建议转账：</div>
+        <ul class="list-disc pl-5 space-y-1">${settlements.map(s=>`<li>${s.from} → ${s.to} $${fmt(s.amount)}</li>`).join('') || '<li>已均衡，无需转账</li>'}</ul>
+      `;
+    }
+
+    // —— 生成上月结算（写入 summaries，可选） ——
+    async function generatePrevSummary(){
+      const now = new Date();
+      const firstThis = new Date(now.getFullYear(), now.getMonth(), 1);
+      const firstPrev = new Date(now.getFullYear(), now.getMonth()-1, 1);
+      const label = `${firstPrev.getFullYear()}-${String(firstPrev.getMonth()+1).padStart(2,'0')}`;
+
+      const snap = await db.collection('purchases')
+        .where('purchasedAt','>=', firstPrev.getTime())
+        .where('purchasedAt','<', firstThis.getTime())
+        .get();
+
+      const entries = snap.docs.map(d=>d.data());
+      const members = ['塔','椰','刀'];
+      const paid = { '塔':0, '椰':0, '刀':0 };
+      const owed = { '塔':0, '椰':0, '刀':0 };
+
+      for(const x of entries){
+        paid[x.payer] = (paid[x.payer] || 0) + x.amount;
+        if(x.splitMode==='equal'){
+          const s = x.amount/3; members.forEach(n=> owed[n]+=s);
+        }else{
+          members.forEach(n=> owed[n]+= (x.split?.[n] || 0));
+        }
+      }
+      members.forEach(n=> { paid[n]=+fmt(paid[n]); owed[n]=+fmt(owed[n]); });
+      const net = {}; members.forEach(n=> net[n]= +fmt(paid[n]-owed[n]) );
+      const settlements = settle(net);
+
+      await db.collection('summaries').doc(label).set({
+        month: label, totals: paid, owed, net, settlements, generatedAt: Date.now()
+      });
+      note(`已生成：${label}`);
+    }
+
+    // —— 清算算法（最少交易数的贪心） ——
+    function settle(net){
+      const debtors = [], creditors = [];
+      for(const [name, val] of Object.entries(net)){
+        if(val < -0.005) debtors.push({name, amt: -val});
+        if(val > 0.005) creditors.push({name, amt: val});
+      }
+      debtors.sort((a,b)=>b.amt-a.amt);
+      creditors.sort((a,b)=>b.amt-a.amt);
+      const res = []; let i=0,j=0;
+      while(i<debtors.length && j<creditors.length){
+        const pay = Math.min(debtors[i].amt, creditors[j].amt);
+        if(pay > 0.005) res.push({from: debtors[i].name, to: creditors[j].name, amount: +fmt(pay)});
+        debtors[i].amt = +(debtors[i].amt - pay).toFixed(2);
+        creditors[j].amt = +(creditors[j].amt - pay).toFixed(2);
+        if(debtors[i].amt <= 0.005) i++;
+        if(creditors[j].amt <= 0.005) j++;
+      }
+      return res;
+    }
+  </script>
+</body>
+</html>
